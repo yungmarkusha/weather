@@ -1,12 +1,11 @@
 import logging
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update
 from telegram.ext import (
-    Updater,
+    Application,
     CommandHandler,
     MessageHandler,
-    Filters,
-    ConversationHandler,
-    CallbackContext,
+    filters,
+    ContextTypes,
 )
 from config import Config
 
@@ -17,152 +16,126 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Состояния для ConversationHandler
-CITY, UNIT = range(2)
 
-
-def start(update: Update, context: CallbackContext) -> None:
-    """Отправляет приветственное сообщение при команде /start"""
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Приветственное сообщение с инструкцией"""
     user = update.effective_user
-    update.message.reply_text(
+    await update.message.reply_text(
         f"Привет, {user.first_name}!\n"
-        "Я бот, который покажет тебе текущую погоду в любом городе.\n"
-        "Нажми /weather чтобы узнать погоду или /help для списка команд."
+        "Просто напиши мне название города, и я покажу текущую погоду.\n"
+        "Например: Москва или London\n\n"
+        "Команды:\n"
+        "/help - справка\n"
+        "/weather - альтернативный способ запроса погоды"
     )
 
 
-def help_command(update: Update, context: CallbackContext) -> None:
-    """Отправляет сообщение с помощью при команде /help"""
-    update.message.reply_text(
-        "Доступные команды:\n"
-        "/start - приветственное сообщение\n"
-        "/weather - узнать погоду в городе\n"
-        "/help - список команд\n"
-        "Просто отправь мне название города, и я покажу погоду в нем!"
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Справка по использованию бота"""
+    await update.message.reply_text(
+        "Как пользоваться ботом:\n"
+        "1. Просто напиши название города (например: Париж)\n"
+        "2. Или используй команду /weather\n\n"
+        "Бот поддерживает города на любом языке, как на русском (Москва), "
+        "так и на английском (Moscow)."
     )
 
 
-def weather_command(update: Update, context: CallbackContext) -> int:
-    """Начинает диалог запроса погоды"""
-    update.message.reply_text(
-        "В каком городе ты хочешь узнать погоду?",
-        reply_markup=ReplyKeyboardRemove(),
+async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Альтернативный способ запроса погоды через команду"""
+    await update.message.reply_text(
+        "Напиши название города, и я покажу текущую погоду:"
     )
-    return CITY
 
 
-def get_weather(city: str, api_key: str) -> dict:
-    """Получает данные о погоде с OpenWeatherMap API"""
+def get_weather_data(city: str) -> dict:
+    """Получение данных о погоде из API"""
     import requests
-    params = {
-        'q': city,
-        'appid': api_key,
-        'units': 'metric',
-        'lang': 'ru'
-    }
     try:
-        response = requests.get(Config.WEATHER_API_URL, params=params)
+        response = requests.get(
+            Config.WEATHER_API_URL,
+            params={
+                'q': city,
+                'appid': Config.OPENWEATHER_API_KEY,
+                'units': 'metric',
+                'lang': 'ru'
+            }
+        )
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка при запросе погоды: {e}")
+        logger.error(f"Weather API error: {e}")
         return None
 
 
-def format_weather(weather_data: dict) -> str:
-    """Форматирует данные о погоде в читаемое сообщение"""
-    if not weather_data:
-        return "Не удалось получить данные о погоде. Попробуйте позже."
-
+def format_weather_message(weather_data: dict) -> str:
+    """Форматирование данных о погоде в читаемое сообщение"""
     city = weather_data.get('name', 'Неизвестный город')
     temp = weather_data['main']['temp']
     feels_like = weather_data['main']['feels_like']
-    humidity = weather_data['main']['humidity']
-    pressure = weather_data['main']['pressure']
-    wind_speed = weather_data['wind']['speed']
     description = weather_data['weather'][0]['description'].capitalize()
+    humidity = weather_data['main']['humidity']
+    wind_speed = weather_data['wind']['speed']
 
     return (
-        f"Погода в {city}:\n"
-        f"🌡 Температура: {temp}°C (ощущается как {feels_like}°C)\n"
-        f"📝 {description}\n"
-        f"💧 Влажность: {humidity}%\n"
-        f"🌀 Давление: {pressure} hPa\n"
-        f"🌬 Ветер: {wind_speed} м/с"
+        f"🌤 Погода в {city}:\n"
+        f"• Температура: {temp}°C (ощущается как {feels_like}°C)\n"
+        f"• Состояние: {description}\n"
+        f"• Влажность: {humidity}%\n"
+        f"• Ветер: {wind_speed} м/с\n\n"
+        f"Обновлено: {weather_data['dt']}"
     )
 
 
-def receive_city(update: Update, context: CallbackContext) -> int:
-    """Получает город от пользователя и показывает погоду"""
-    city = update.message.text
-    weather_data = get_weather(city, Config.OPENWEATHER_API_KEY)
+async def handle_city_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик ввода названия города"""
+    city = update.message.text.strip()
 
-    if weather_data and weather_data.get('cod') == 200:
-        message = format_weather(weather_data)
-    else:
-        message = "Город не найден. Пожалуйста, попробуйте еще раз."
+    if len(city) < 2:
+        await update.message.reply_text("Слишком короткое название города. Попробуйте еще раз.")
+        return
 
-    update.message.reply_text(message)
-    return ConversationHandler.END
+    await update.message.reply_text(f"🔍 Ищу погоду для {city}...")
 
+    weather_data = get_weather_data(city)
 
-def cancel(update: Update, context: CallbackContext) -> int:
-    """Завершает диалог"""
-    update.message.reply_text(
-        'Диалог завершен.',
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationHandler.END
+    if not weather_data or weather_data.get('cod') != 200:
+        await update.message.reply_text(
+            f"Не удалось найти город '{city}'. Проверьте название и попробуйте еще раз.\n"
+            "Примеры: Москва, London, 東京"
+        )
+        return
 
-
-def handle_text(update: Update, context: CallbackContext) -> None:
-    """Обрабатывает текстовые сообщения, не являющиеся командами"""
-    city = update.message.text
-    weather_data = get_weather(city, Config.OPENWEATHER_API_KEY)
-
-    if weather_data and weather_data.get('cod') == 200:
-        message = format_weather(weather_data)
-    else:
-        message = "Город не найден. Пожалуйста, попробуйте еще раз или используйте /weather."
-
-    update.message.reply_text(message)
+    weather_message = format_weather_message(weather_data)
+    await update.message.reply_text(weather_message)
 
 
-def error_handler(update: Update, context: CallbackContext) -> None:
-    """Логирует ошибки"""
-    logger.error(msg="Ошибка при обработке сообщения:", exc_info=context.error)
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик ошибок"""
+    logger.error("Exception while handling update:", exc_info=context.error)
     if update.message:
-        update.message.reply_text('Произошла ошибка. Пожалуйста, попробуйте позже.')
+        await update.message.reply_text(
+            "Произошла ошибка при обработке запроса. Пожалуйста, попробуйте позже."
+        )
 
 
 def main() -> None:
     """Запуск бота"""
-    updater = Updater(Config.TELEGRAM_TOKEN)
-    dispatcher = updater.dispatcher
+    application = Application.builder().token(Config.TELEGRAM_TOKEN).build()
 
-    # Обработчики команд
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("help", help_command))
+    # Регистрация обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("weather", weather_command))
 
-    # ConversationHandler для команды /weather
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('weather', weather_command)],
-        states={
-            CITY: [MessageHandler(Filters.text & ~Filters.command, receive_city)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    dispatcher.add_handler(conv_handler)
-
-    # Обработчик текстовых сообщений
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+    # Основной обработчик текстовых сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_city_input))
 
     # Обработчик ошибок
-    dispatcher.add_error_handler(error_handler)
+    application.add_error_handler(error_handler)
 
     # Запуск бота
-    updater.start_polling()
-    updater.idle()
+    application.run_polling()
 
 
 if __name__ == '__main__':
